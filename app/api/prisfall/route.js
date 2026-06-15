@@ -23,7 +23,7 @@ export async function GET(request) {
 
     // Hent produkter sortert på lavest pris – disse er ofte på tilbud
     const res = await fetch(
-      `${BASE}/products?sort=price_asc&size=${size}&unique=true`,
+      `${BASE}/products?sort=price_asc&size=${size}&unique=1`,
       {
         headers: { Authorization: `Bearer ${apiKey}` },
         next: { revalidate: 3600 },
