@@ -1,6 +1,8 @@
 /**
  * GET /api/prisfall
- * Henter produkter med prisfall fra Kassalapp ved å sammenligne prishistorikk.
+ * Henter billigste produkter fra Kassalapp – «Dagens beste priser».
+ * Siden hobby-planen ikke har prishistorikk, viser vi de rimeligste
+ * produktene per kg/liter som et nyttig alternativ.
  */
 
 const BASE = "https://kassal.app/api/v1";
@@ -11,11 +13,11 @@ export async function GET(request) {
     if (!apiKey) return Response.json({ error: "API-nøkkel mangler" }, { status: 500 });
 
     const { searchParams } = new URL(request.url);
-    const size = Math.min(parseInt(searchParams.get("size") || "100"), 100);
+    const size = Math.min(parseInt(searchParams.get("size") || "40"), 100);
 
-    // Hent nyeste produkter – de har oftest oppdatert prishistorikk
+    // Hent produkter sortert på lavest kilopris
     const res = await fetch(
-      `${BASE}/products?sort=date_desc&size=${size}`,
+      `${BASE}/products?sort=price_asc&size=${size}`,
       {
         headers: { Authorization: `Bearer ${apiKey}` },
         next: { revalidate: 3600 },
@@ -29,45 +31,22 @@ export async function GET(request) {
 
     const data = await res.json();
 
-    // Finn produkter der prisen har falt sammenlignet med tidligere pris
-    const prisfall = (data.data || [])
-      .map((p) => {
-        const history = p.price_history || [];
-        const prisNaa = p.current_price ?? null;
-        if (!prisNaa || history.length < 2) return null;
-
-        // Finn høyeste tidligere pris (ikke dagens)
-        const tidligerePriser = history.slice(1).map(h => h.price).filter(Boolean);
-        if (!tidligerePriser.length) return null;
-        const prisFor = Math.max(...tidligerePriser);
-
-        // Kun vis hvis prisen faktisk har falt
-        if (prisFor <= prisNaa) return null;
-
-        const fall = Math.round((prisFor - prisNaa) * 100) / 100;
-        const fallPct = Math.round((fall / prisFor) * 100);
-
-        // Kun vis meningsfylte prisfall (minst 5%)
-        if (fallPct < 5) return null;
-
-        return {
-          ean: p.ean,
-          navn: p.name,
-          bilde: p.image || null,
-          butikk: p.store?.name || null,
-          butikkKode: p.store?.code || null,
-          prisFor,
-          prisNaa,
-          prisfall: fall,
-          prisfallPct: fallPct,
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.prisfallPct - a.prisfallPct)
-      .slice(0, 20);
+    const produkter = (data.data || [])
+      .filter(p => p.current_price && p.current_price > 0)
+      .map(p => ({
+        ean: p.ean,
+        navn: p.name,
+        bilde: p.image || null,
+        butikk: p.store?.name || null,
+        butikkKode: p.store?.code || null,
+        prisNaa: p.current_price,
+        kilopris: p.current_unit_price || null,
+        vekt: p.weight || null,
+        vektEnhet: p.weight_unit || null,
+      }));
 
     return Response.json(
-      { prisfall, hentet: new Date().toISOString() },
+      { prisfall: produkter, hentet: new Date().toISOString() },
       {
         headers: {
           "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=600",
