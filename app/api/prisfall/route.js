@@ -1,40 +1,37 @@
 /**
  * GET /api/prisfall
- * Henter produkter fra Kassalapp – «Dagens beste priser».
+ * Henter et variert utvalg produkter fra Kassalapp – «Dagens beste priser».
  */
 
 const BASE = "https://kassal.app/api/v1";
+
+const KATEGORIER = ["kylling", "laks", "yoghurt", "ost", "egg", "brød", "banan", "eple"];
 
 export async function GET(request) {
   try {
     const apiKey = process.env.KASSALAPP_API_KEY;
     if (!apiKey) return Response.json({ error: "API-nøkkel mangler" }, { status: 500 });
 
-    const { searchParams } = new URL(request.url);
-    const size = Math.min(parseInt(searchParams.get("size") || "20"), 100);
+    // Hent fra 4 tilfeldige kategorier parallelt
+    const valgte = KATEGORIER.sort(() => 0.5 - Math.random()).slice(0, 4);
 
-    const res = await fetch(
-      `${BASE}/products?search=melk&size=${size}`,
-      {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        next: { revalidate: 3600 },
-      }
+    const resultater = await Promise.allSettled(
+      valgte.map(kategori =>
+        fetch(`${BASE}/products?search=${kategori}&size=5&unique=1`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          next: { revalidate: 3600 },
+        }).then(r => r.ok ? r.json() : { data: [] })
+      )
     );
 
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      return Response.json({ error: `Kassalapp ${res.status}: ${txt.slice(0,200)}` }, { status: 502 });
-    }
-
-    const data = await res.json();
-    const antall = data.data?.length || 0;
-
-    const prisfall = (data.data || [])
-      .filter(p => p.current_price && p.current_price > 0)
+    const alle = resultater
+      .filter(r => r.status === "fulfilled")
+      .flatMap(r => r.value?.data || [])
+      .filter(p => p.current_price && p.current_price > 0 && p.image)
       .map(p => ({
         ean: p.ean,
         navn: p.name,
-        bilde: p.image || null,
+        bilde: p.image,
         butikk: p.store?.name || null,
         butikkKode: p.store?.code || null,
         prisNaa: p.current_price,
@@ -42,9 +39,17 @@ export async function GET(request) {
         vektEnhet: p.weight_unit || null,
       }));
 
+    // Dedupliser på EAN
+    const sett = new Set();
+    const prisfall = alle.filter(p => {
+      if(!p.ean || sett.has(p.ean)) return false;
+      sett.add(p.ean);
+      return true;
+    }).slice(0, 20);
+
     return Response.json(
-      { prisfall, antall, hentet: new Date().toISOString() },
-      { headers: { "Cache-Control": "no-store" } }
+      { prisfall, hentet: new Date().toISOString() },
+      { headers: { "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=600" } }
     );
   } catch (err) {
     return Response.json({ error: err.message }, { status: 500 });
