@@ -2,11 +2,10 @@
  * GET /api/prisfall
  *
  * Henter produkter med størst prisfall fra Kassalapp.
- * Disse er i praksis ukens beste tilbud/priskutt.
+ * Bruker /products?sort=price_asc kombinert med prishistorikk.
  *
  * Query-params:
- *   size     – antall produkter (max 100, default 40)
- *   store    – filtrer på butikkjede (f.eks. "KIWI", "REMA_1000")
+ *   size  – antall produkter (max 100, default 40)
  *
  * Returnerer:
  *   { prisfall: [{ ean, navn, bilde, butikk, prisFor, prisNaa, prisfall, prisfallPct }] }
@@ -21,42 +20,47 @@ export async function GET(request) {
 
     const { searchParams } = new URL(request.url);
     const size = Math.min(parseInt(searchParams.get("size") || "40"), 100);
-    const store = searchParams.get("store") || null;
 
-    // Hent produkter sortert på prisfall fra Kassalapp
-    const qs = new URLSearchParams({
-      sort: "price_asc",
-      size: size,
-      unique: "true",
-    });
-    if (store) qs.set("store", store);
+    // Hent produkter sortert på lavest pris – disse er ofte på tilbud
+    const res = await fetch(
+      `${BASE}/products?sort=price_asc&size=${size}&unique=true`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        next: { revalidate: 3600 },
+      }
+    );
 
-    // Kassalapp har /products/price-history eller vi bruker /products?sort=price_asc
-    // Vi henter "nedsatt" produkter via search med lav pris-sortering
-    const res = await fetch(`${BASE}/products?${qs}&filter=price_drop`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      next: { revalidate: 3600 }, // cache 1 time
-    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      return Response.json({ error: `Kassalapp ${res.status}: ${txt.slice(0,200)}` }, { status: 502 });
+    }
 
-    // Fallback: hvis filter=price_drop ikke støttes, hent produkter generelt
-    const data = res.ok ? await res.json() : { data: [] };
+    const data = await res.json();
 
-    // Normaliser til appens format
-    const prisfall = (data.data || []).map((p) => ({
-      ean: p.ean,
-      navn: p.name,
-      bilde: p.image || null,
-      butikk: p.store?.name || null,
-      butikkKode: p.store?.code || null,
-      prisFor: p.price_history?.previous || null,
-      prisNaa: p.current_price,
-      prisfall: p.price_history?.previous
-        ? Math.round((p.price_history.previous - p.current_price) * 100) / 100
-        : null,
-      prisfallPct: p.price_history?.previous
-        ? Math.round(((p.price_history.previous - p.current_price) / p.price_history.previous) * 100)
-        : null,
-    })).filter(p => p.prisNaa != null);
+    const prisfall = (data.data || [])
+      .map((p) => {
+        // Finn prishistorikk hvis tilgjengelig
+        const history = p.price_history || p.priceHistory || null;
+        const prisFor = history?.highest_price || history?.previous || null;
+        const prisNaa = p.current_price ?? null;
+        const fall = prisFor && prisNaa ? Math.round((prisFor - prisNaa) * 100) / 100 : null;
+        const fallPct = prisFor && prisNaa && prisFor > 0
+          ? Math.round(((prisFor - prisNaa) / prisFor) * 100)
+          : null;
+
+        return {
+          ean: p.ean,
+          navn: p.name,
+          bilde: p.image || null,
+          butikk: p.store?.name || null,
+          butikkKode: p.store?.code || null,
+          prisFor: prisFor,
+          prisNaa: prisNaa,
+          prisfall: fall,
+          prisfallPct: fallPct,
+        };
+      })
+      .filter((p) => p.prisNaa != null);
 
     return Response.json(
       { prisfall, hentet: new Date().toISOString() },
