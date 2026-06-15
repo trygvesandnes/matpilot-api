@@ -1,14 +1,6 @@
 /**
  * GET /api/prisfall
- *
- * Henter produkter med størst prisfall fra Kassalapp.
- * Bruker /products?sort=price_asc kombinert med prishistorikk.
- *
- * Query-params:
- *   size  – antall produkter (max 100, default 40)
- *
- * Returnerer:
- *   { prisfall: [{ ean, navn, bilde, butikk, prisFor, prisNaa, prisfall, prisfallPct }] }
+ * Henter produkter med prisfall fra Kassalapp ved å sammenligne prishistorikk.
  */
 
 const BASE = "https://kassal.app/api/v1";
@@ -19,11 +11,11 @@ export async function GET(request) {
     if (!apiKey) return Response.json({ error: "API-nøkkel mangler" }, { status: 500 });
 
     const { searchParams } = new URL(request.url);
-    const size = Math.min(parseInt(searchParams.get("size") || "40"), 100);
+    const size = Math.min(parseInt(searchParams.get("size") || "100"), 100);
 
-    // Hent produkter sortert på lavest pris – disse er ofte på tilbud
+    // Hent nyeste produkter – de har oftest oppdatert prishistorikk
     const res = await fetch(
-      `${BASE}/products?sort=price_asc&size=${size}&unique=1`,
+      `${BASE}/products?sort=date_desc&size=${size}`,
       {
         headers: { Authorization: `Bearer ${apiKey}` },
         next: { revalidate: 3600 },
@@ -37,16 +29,26 @@ export async function GET(request) {
 
     const data = await res.json();
 
+    // Finn produkter der prisen har falt sammenlignet med tidligere pris
     const prisfall = (data.data || [])
       .map((p) => {
-        // Finn prishistorikk hvis tilgjengelig
-        const history = p.price_history || p.priceHistory || null;
-        const prisFor = history?.highest_price || history?.previous || null;
+        const history = p.price_history || [];
         const prisNaa = p.current_price ?? null;
-        const fall = prisFor && prisNaa ? Math.round((prisFor - prisNaa) * 100) / 100 : null;
-        const fallPct = prisFor && prisNaa && prisFor > 0
-          ? Math.round(((prisFor - prisNaa) / prisFor) * 100)
-          : null;
+        if (!prisNaa || history.length < 2) return null;
+
+        // Finn høyeste tidligere pris (ikke dagens)
+        const tidligerePriser = history.slice(1).map(h => h.price).filter(Boolean);
+        if (!tidligerePriser.length) return null;
+        const prisFor = Math.max(...tidligerePriser);
+
+        // Kun vis hvis prisen faktisk har falt
+        if (prisFor <= prisNaa) return null;
+
+        const fall = Math.round((prisFor - prisNaa) * 100) / 100;
+        const fallPct = Math.round((fall / prisFor) * 100);
+
+        // Kun vis meningsfylte prisfall (minst 5%)
+        if (fallPct < 5) return null;
 
         return {
           ean: p.ean,
@@ -54,13 +56,15 @@ export async function GET(request) {
           bilde: p.image || null,
           butikk: p.store?.name || null,
           butikkKode: p.store?.code || null,
-          prisFor: prisFor,
-          prisNaa: prisNaa,
+          prisFor,
+          prisNaa,
           prisfall: fall,
           prisfallPct: fallPct,
         };
       })
-      .filter((p) => p.prisNaa != null);
+      .filter(Boolean)
+      .sort((a, b) => b.prisfallPct - a.prisfallPct)
+      .slice(0, 20);
 
     return Response.json(
       { prisfall, hentet: new Date().toISOString() },
