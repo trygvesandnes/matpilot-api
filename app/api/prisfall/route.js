@@ -1,8 +1,6 @@
 /**
  * GET /api/prisfall
- * Henter billigste produkter fra Kassalapp – «Dagens beste priser».
- * Siden hobby-planen ikke har prishistorikk, viser vi de rimeligste
- * produktene per kg/liter som et nyttig alternativ.
+ * Henter produkter fra Kassalapp – «Dagens beste priser».
  */
 
 const BASE = "https://kassal.app/api/v1";
@@ -13,11 +11,10 @@ export async function GET(request) {
     if (!apiKey) return Response.json({ error: "API-nøkkel mangler" }, { status: 500 });
 
     const { searchParams } = new URL(request.url);
-    const size = Math.min(parseInt(searchParams.get("size") || "40"), 100);
+    const size = Math.min(parseInt(searchParams.get("size") || "20"), 100);
 
-    // Hent produkter sortert på lavest kilopris
     const res = await fetch(
-      `${BASE}/products?sort=price_asc&size=${size}`,
+      `${BASE}/products?search=melk&size=${size}`,
       {
         headers: { Authorization: `Bearer ${apiKey}` },
         next: { revalidate: 3600 },
@@ -30,8 +27,9 @@ export async function GET(request) {
     }
 
     const data = await res.json();
+    const antall = data.data?.length || 0;
 
-    const produkter = (data.data || [])
+    const prisfall = (data.data || [])
       .filter(p => p.current_price && p.current_price > 0)
       .map(p => ({
         ean: p.ean,
@@ -41,20 +39,14 @@ export async function GET(request) {
         butikkKode: p.store?.code || null,
         prisNaa: p.current_price,
         kilopris: p.current_unit_price || null,
-        vekt: p.weight || null,
         vektEnhet: p.weight_unit || null,
       }));
 
     return Response.json(
-      { prisfall: produkter, hentet: new Date().toISOString() },
-      {
-        headers: {
-          "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=600",
-        },
-      }
+      { prisfall, antall, hentet: new Date().toISOString() },
+      { headers: { "Cache-Control": "no-store" } }
     );
   } catch (err) {
-    console.error("[/api/prisfall]", err.message);
     return Response.json({ error: err.message }, { status: 500 });
   }
 }
